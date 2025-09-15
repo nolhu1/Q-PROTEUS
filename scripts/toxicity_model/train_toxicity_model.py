@@ -1,16 +1,19 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.svm import SVR, SVC
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
+import joblib
+import os
 import warnings
 warnings.filterwarnings('ignore')
+
+# Create models directory if it doesn't exist
+os.makedirs('models', exist_ok=True)
 
 # Feature engineering functions
 def calculate_aa_composition(sequence):
@@ -140,118 +143,72 @@ def prepare_features(df):
     threshold = target.median()
     binary_target = (target > threshold).astype(int)
     
-    return all_features, target, binary_target
+    return all_features, binary_target
 
-def train_regression_models(X, y):
-    """Train and evaluate regression models"""
-    # Split the data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+def analyze_population_diversity(population_sequences, model, scaler, feature_columns):
+    """Analyze diversity of population sequences"""
+    if not population_sequences:
+        return {"diversity_score": 0, "unique_sequences": 0, "avg_toxicity_prob": 0.5}
     
-    # Scale the features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    # Extract features for all sequences
+    population_features = []
+    for seq in population_sequences:
+        features = extract_features_single_sequence(seq)
+        population_features.append(features)
     
-    # Define models
-    models = {
-        'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
-        'SVR': SVR(kernel='rbf'),
-        'Linear Regression': LinearRegression()
+    # Convert to DataFrame and ensure correct column order
+    population_df = pd.DataFrame(population_features)
+    population_df = population_df.reindex(columns=feature_columns, fill_value=0)
+    
+    # Scale features
+    population_scaled = scaler.transform(population_df)
+    
+    # Predict toxicity probabilities
+    toxicity_probs = model.predict_proba(population_scaled)[:, 1]  # Probability of being non-toxic
+    
+    # Calculate diversity metrics
+    unique_sequences = len(set(population_sequences))
+    diversity_score = unique_sequences / len(population_sequences)
+    avg_toxicity_prob = np.mean(toxicity_probs)
+    
+    return {
+        "diversity_score": diversity_score,
+        "unique_sequences": unique_sequences,
+        "avg_toxicity_prob": avg_toxicity_prob,
+        "toxicity_probs": toxicity_probs
     }
-    
-    results = {}
-    
-    for name, model in models.items():
-        # Train model
-        model.fit(X_train_scaled, y_train)
-        
-        # Make predictions
-        y_pred = model.predict(X_test_scaled)
-        
-        # Evaluate model
-        mse = mean_squared_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
-        
-        results[name] = {
-            'model': model,
-            'mse': mse,
-            'r2': r2,
-            'predictions': y_pred
-        }
-        
-        print(f"{name} - MSE: {mse:.4f}, R²: {r2:.4f}")
-    
-    return results, X_test, y_test
 
-def train_classification_models(X, y):
-    """Train and evaluate classification models"""
-    # Split the data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+def extract_features_single_sequence(sequence):
+    """Extract features for a single peptide sequence"""
+    # Amino acid composition
+    aa_features = calculate_aa_composition(sequence)
     
-    # Scale the features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    # Physicochemical properties
+    physchem_features = calculate_physicochemical_properties(sequence)
     
-    # Define models
-    models = {
-        'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42),
-        'SVC': SVC(kernel='rbf', probability=True),
-        'Logistic Regression': LogisticRegression(random_state=42)
-    }
+    # Sequence-based features
+    seq_features = calculate_sequence_features(sequence)
     
-    results = {}
+    # Combine all features (no experimental data for new sequences)
+    all_features = {**aa_features, **physchem_features, **seq_features, 'hemolytic_concentration': 0}
     
-    for name, model in models.items():
-        # Train model
-        model.fit(X_train_scaled, y_train)
-        
-        # Make predictions
-        y_pred = model.predict(X_test_scaled)
-        y_prob = model.predict_proba(X_test_scaled)[:, 1]
-        
-        # Evaluate model
-        accuracy = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred)
-        
-        results[name] = {
-            'model': model,
-            'accuracy': accuracy,
-            'report': report,
-            'predictions': y_pred,
-            'probabilities': y_prob
-        }
-        
-        print(f"{name} - Accuracy: {accuracy:.4f}")
-        print(report)
-    
-    return results, X_test, y_test
+    return all_features
 
-def plot_feature_importance(model, feature_names, top_n=20):
-    """Plot feature importance for tree-based models"""
-    if hasattr(model, 'feature_importances_'):
-        importances = model.feature_importances_
-        indices = np.argsort(importances)[::-1]
-        
-        plt.figure(figsize=(10, 8))
-        plt.title("Feature Importances")
-        plt.barh(range(top_n), importances[indices][:top_n][::-1], color='b', align='center')
-        plt.yticks(range(top_n), [feature_names[i] for i in indices[:top_n][::-1]])
-        plt.xlabel('Relative Importance')
-        plt.tight_layout()
-        plt.show()
-    else:
-        print("This model doesn't support feature importance visualization.")
-
-def plot_confusion_matrix(y_true, y_pred, model_name):
-    """Plot confusion matrix for classification results"""
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.title(f'Confusion Matrix - {model_name}')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.show()
+def create_toxicity_predictor(sequence, model, scaler, feature_columns):
+    """Predict toxicity probability for a single sequence"""
+    features = extract_features_single_sequence(sequence)
+    
+    # Convert to DataFrame with correct column order
+    features_df = pd.DataFrame([features])
+    features_df = features_df.reindex(columns=feature_columns, fill_value=0)
+    
+    # Scale features
+    features_scaled = scaler.transform(features_df)
+    
+    # Predict probability of being non-toxic (class 1)
+    probability_non_toxic = model.predict_proba(features_scaled)[0, 1]
+    
+    return probability_non_toxic
 
 def main():
     # Load the data
@@ -259,74 +216,94 @@ def main():
     
     # Prepare features
     print("Preparing features...")
-    X, y_reg, y_clf = prepare_features(df)
+    X, y = prepare_features(df)
     
     print(f"Dataset shape: {X.shape}")
     print(f"Number of samples: {X.shape[0]}")
     print(f"Number of features: {X.shape[1]}")
     
-    # Check for class distribution in classification target
+    # Check for class distribution
     print("\nClass distribution:")
-    print(y_clf.value_counts())
+    print(y.value_counts())
+    print(f"Baseline accuracy: {max(y.value_counts(normalize=True)):.3f}")
     
-    # Train regression models
-    print("\nTraining regression models...")
-    reg_results, X_test_reg, y_test_reg = train_regression_models(X, y_reg)
+    # Split the data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
     
-    # Train classification models
-    print("\nTraining classification models...")
-    clf_results, X_test_clf, y_test_clf = train_classification_models(X, y_clf)
-    
-    # Plot feature importance for the best regression model
-    best_reg_name = max(reg_results.keys(), key=lambda k: reg_results[k]['r2'])
-    print(f"\nBest regression model: {best_reg_name}")
-    plot_feature_importance(reg_results[best_reg_name]['model'], X.columns)
-    
-    # Plot confusion matrix for the best classification model
-    best_clf_name = max(clf_results.keys(), key=lambda k: clf_results[k]['accuracy'])
-    print(f"Best classification model: {best_clf_name}")
-    plot_confusion_matrix(y_test_clf, clf_results[best_clf_name]['predictions'], best_clf_name)
-    
-    # Cross-validation for the best models
-    print("\nCross-validation results:")
+    # Scale the features
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
     
-    # For regression
-    rf_reg = RandomForestRegressor(n_estimators=100, random_state=42)
-    reg_scores = cross_val_score(rf_reg, X_scaled, y_reg, cv=5, scoring='r2')
-    print(f"Random Forest Regression CV R²: {reg_scores.mean():.4f} (±{reg_scores.std():.4f})")
-    
-    # For classification
-    rf_clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    clf_scores = cross_val_score(rf_clf, X_scaled, y_clf, cv=5, scoring='accuracy')
-    print(f"Random Forest Classification CV Accuracy: {clf_scores.mean():.4f} (±{clf_scores.std():.4f})")
-    
-    # Hyperparameter tuning for the best model (Random Forest)
-    print("\nPerforming hyperparameter tuning for Random Forest...")
-    param_grid = {
-        'n_estimators': [50, 100, 200],
-        'max_depth': [None, 10, 20, 30],
-        'min_samples_split': [2, 5, 10]
-    }
-    
-    # For regression
-    grid_search_reg = GridSearchCV(
-        RandomForestRegressor(random_state=42),
-        param_grid, cv=3, scoring='r2', n_jobs=-1
+    # Train Random Forest classifier (best performing model)
+    print("\nTraining Random Forest Classifier...")
+    model = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=10,
+        min_samples_split=10,
+        random_state=42,
+        class_weight='balanced'  # Handle any class imbalance
     )
-    grid_search_reg.fit(X_scaled, y_reg)
-    print(f"Best parameters for regression: {grid_search_reg.best_params_}")
-    print(f"Best CV score for regression: {grid_search_reg.best_score_:.4f}")
     
-    # For classification
-    grid_search_clf = GridSearchCV(
-        RandomForestClassifier(random_state=42),
-        param_grid, cv=3, scoring='accuracy', n_jobs=-1
-    )
-    grid_search_clf.fit(X_scaled, y_clf)
-    print(f"Best parameters for classification: {grid_search_clf.best_params_}")
-    print(f"Best CV score for classification: {grid_search_clf.best_score_:.4f}")
+    model.fit(X_train_scaled, y_train)
+    
+    # Make predictions
+    y_pred = model.predict(X_test_scaled)
+    y_prob = model.predict_proba(X_test_scaled)[:, 1]  # Probability of class 1 (non-toxic)
+    
+    # Evaluate model
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"\nTest Accuracy: {accuracy:.4f}")
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred))
+    
+    # Cross-validation
+    print("\nCross-validation results:")
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(model, scaler.transform(X), y, cv=cv, scoring='accuracy')
+    print(f"CV Accuracy: {cv_scores.mean():.4f} (±{cv_scores.std():.4f})")
+    
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'feature': X.columns,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    print("\nTop 10 most important features:")
+    print(feature_importance.head(10))
+    
+    # Save model and scaler
+    joblib.dump(model, 'models/toxicity_predictor.pkl')
+    joblib.dump(scaler, 'models/toxicity_feature_scaler.pkl')
+    joblib.dump(X.columns.tolist(), 'models/feature_columns.pkl')
+    
+    print("\nModels saved successfully!")
+    print("Files created:")
+    print("  - models/toxicity_predictor.pkl (classification model)")
+    print("  - models/toxicity_feature_scaler.pkl (feature scaler)")
+    print("  - models/feature_columns.pkl (feature column names)")
+    
+    # Test the predictor with example sequences
+    print("\nTesting predictor with example sequences...")
+    test_sequences = [
+        "SKEKIGKEFKRIVQRIKDFLR",  # Known non-toxic from training
+        "AAAAAAAAAAAAAAAAAAAA",    # Simple poly-alanine (likely non-toxic)
+        "KKKKKKKKKKKKKKKKKKKK",    # Poly-lysine (might be toxic)
+    ]
+    
+    for seq in test_sequences:
+        prob = create_toxicity_predictor(seq, model, scaler, X.columns)
+        print(f"Sequence: {seq[:20]}... -> Non-toxic probability: {prob:.3f}")
+    
+    # Demonstrate population diversity analysis
+    print("\nTesting population diversity analysis...")
+    population = test_sequences * 3  # Create a small population
+    diversity = analyze_population_diversity(population, model, scaler, X.columns)
+    print(f"Population diversity: {diversity['diversity_score']:.3f}")
+    print(f"Unique sequences: {diversity['unique_sequences']}")
+    print(f"Average non-toxic probability: {diversity['avg_toxicity_prob']:.3f}")
 
 if __name__ == "__main__":
     main()
