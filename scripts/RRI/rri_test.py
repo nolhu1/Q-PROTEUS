@@ -1,13 +1,24 @@
 import joblib
 from rri_calc import bootstrap_rri
 
+# Load model + scaler
 model = joblib.load("models/efficacy_predictor.pkl")
 scaler = joblib.load("models/feature_scaler.pkl")
 
-# Test on known AMPs
-colistin = "CLCRRLRCG"     # known resistance-prone
-ll37 = "LLGDFFRKSKEKIGKEFKRIVQRIKDFLRNLVPRTES"  # durable AMP
+# Peptides to test
+peptides = {
+    "LL-37 variant": "LLGDFFRKSKEKIGKEFKRIVQRIKDFLRNLVPRTES",
+    "Magainin-2": "GIGKFLHSAKKFGKAFVGEIMNS",
+    "Protegrin-1": "RGGRLCYCRRRFCVCVGR",
+    "Temporin-1": "FLPLIGRVLSGIL",
+    "Dermaseptin S4": "GLWSKIKEVGKEAAKAAAKAAGKAALGAVSEAV",
+    "Cathelicidin mini": "KRLKKLLKKLKK",
+    "Synthetic neutral": "AIGILVAGLVALGA",
+    "Weak AMP variant": "GAFVLSGAKILK"
+}
 
-for seq, name in [(colistin, "Colistin"), (ll37, "LL-37")]:
+# Run RRI bootstrap for each peptide
+for name, seq in peptides.items():
     res = bootstrap_rri(seq, model, scaler, N=100, reps=50)
-    print(f"{name}: RRI_mean={res['RRI_mean']:.3f}, CI=({res['RRI_CI_low']:.3f}, {res['RRI_CI_high']:.3f})")
+    print(f"{name}: RRI_mean={res['RRI_mean']:.3f}, "
+          f"CI=({res['RRI_CI_low']:.3f}, {res['RRI_CI_high']:.3f})")
