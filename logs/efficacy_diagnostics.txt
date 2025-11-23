@@ -1,0 +1,30 @@
+=== EFFICACY MODEL DIAGNOSTICS ===
+Accuracy: 0.976
+ROC AUC: 0.997
+Confusion Matrix:
+[[1653   50]
+ [  38 1870]]
+              precision    recall  f1-score   support
+
+           0       0.98      0.97      0.97      1703
+           1       0.97      0.98      0.98      1908
+
+    accuracy                           0.98      3611
+   macro avg       0.98      0.98      0.98      3611
+weighted avg       0.98      0.98      0.98      3611
+
+
+Feature importances:
+Net_Charge                 0.295125
+Length                     0.217193
+Fraction_Positive_AA       0.208163
+Fraction_Hydrophobic_AA    0.094651
+Hydrophobicity_GRAVY       0.078511
+Fraction_Negative_AA       0.074360
+Instability_Index          0.031998
+
+LL-37: WT=0.988, mutants_mean=0.973, std=0.026
+
+Colistin: WT=0.941, mutants_mean=0.868, std=0.101
+
+✅ Diagnostics complete. See PNGs in logs/ and paste this log below into ChatGPT.

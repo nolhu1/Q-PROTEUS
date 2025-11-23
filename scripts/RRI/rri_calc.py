@@ -7,6 +7,7 @@ from Bio.SeqUtils.ProtParam import ProteinAnalysis
 from mutants import sample_mutants
 import pandas as pd
 
+
 def compute_features(sequence: str) -> dict:
     """Compute features consistent with training pipeline."""
     analysed_seq = ProteinAnalysis(sequence)
@@ -136,9 +137,18 @@ def bootstrap_rri(
 
 if __name__ == "__main__":
     # Example usage for quick validation
-    model = joblib.load("models/efficacy_predictor.pkl")
-    scaler = joblib.load("models/feature_scaler.pkl")
-
-    seq = "LLGDFFRKSKEKIGKEFKRIVQRIKDFLRNLVPRTES"
-    result = calculate_rri(seq, model, scaler, N=50)
-    print(result)
+    sequences = {
+    # --- Known AMPs ---
+    "Colistin": "CLCRRWIRVCR",
+    "LL-37": "LLGDFFRKSKEKIGKEFKRIVQRIKDFLRNLVPRTES",
+    "Magainin-2": "GIGKFLHSAKKFGKAFVGEIMNS",
+    "Pexiganan": "GIGKFLKKAKKFGKAFVKILKK",
+    "Temporin A": "FLPLIGRVLSGIL",
+    
+    # --- Neutral / acidic peptides (non-AMP-like) ---
+    "Poly-Gly": "GGGGGGGGGGGG",
+    "Poly-Ala": "AAAAAAAAAAAA",
+    "Acidic_1": "DEDEDEDEDEDE",
+    "Neutral_Random": "GAVLPSTNQYIRKHF",
+    "Hydrophobic_Random": "FWILVLAIIVMLLV",
+    }
