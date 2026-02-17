@@ -67,11 +67,14 @@ def debug_prediction(name, sequence):
 
 # --- Example peptides ---
 peptides = {
-    "Colistin": "KWKKKKKKKKK",
-    "LL-37": "LLGDFFRKSKEKIGKEFKRIVQRIKDFLRNLVPRTES",
+    "LL-37 variant": "LLGDFFRKSKEKIGKEFKRIVQRIKDFLRNLVPRTES",
     "Magainin-2": "GIGKFLHSAKKFGKAFVGEIMNS",
-    "Pexiganan": "GIGKFLKKAKKFGKAFVKILKK",
-    "Temporin A": "FLPLIGRVLSGIL"
+    "Protegrin-1": "RGGRLCYCRRRFCVCVGR",
+    "Temporin-1": "FLPLIGRVLSGIL",
+    "Dermaseptin S4": "GLWSKIKEVGKEAAKAAAKAAGKAALGAVSEAV",
+    "Cathelicidin mini": "KRLKKLLKKLKK",
+    "Synthetic neutral": "AIGILVAGLVALGA",
+    "Weak AMP variant": "GAFVLSGAKILK"
 }
 
 for name, seq in peptides.items():
