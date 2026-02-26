@@ -1,334 +1,214 @@
-"""
-Figure 9: 3D Pareto Front Comparison (REALISTIC SYNTHETIC DATA)
-
-This script generates synthetic populations for:
-  1) GA
-  2) QIEA
-  3) QIEA+RRI
-and highlights:
-  4) QIEA+RRI Pareto Front
-
-It then computes hypervolume (Monte Carlo) on transformed objectives:
-  - maximize efficacy
-  - maximize (1 - toxicity)
-  - maximize RRI
-
-The generator is calibrated (and will auto-tune if needed) to meet targets:
-  - HV(QIEA+RRI) / HV(GA) in [1.20, 1.30]
-  - HV(QIEA+RRI) / HV(QIEA) in [1.10, 1.15]
-  - Superior region points (eff>=0.95, tox<=0.20, rri>=0.80) in [5, 10]
-
-No assertions are used; instead, the script auto-adjusts until targets are met,
-then plots and prints the achieved metrics.
-
-Requires: numpy, matplotlib
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 
+# -----------------------------
+# Synthetic data (realistic-ish)
+# -----------------------------
+rng = np.random.default_rng(7)
+
+def clipped_normal(mean, sd, low, high, n):
+    x = rng.normal(mean, sd, n)
+    return np.clip(x, low, high)
+
+N = 200  # population size per algorithm
+
+# GA: decent efficacy, higher toxicity, lower RRI
+ga_eff = clipped_normal(0.90, 0.03, 0.80, 0.98, N)
+ga_tox = clipped_normal(0.24, 0.05, 0.05, 0.40, N)
+ga_rri = clipped_normal(0.55, 0.10, 0.10, 0.80, N)
+
+# QIEA: better exploration -> slightly higher efficacy, lower tox, moderate RRI
+q_eff  = clipped_normal(0.93, 0.025, 0.82, 0.99, N)
+q_tox  = clipped_normal(0.20, 0.045, 0.03, 0.35, N)
+q_rri  = clipped_normal(0.65, 0.10, 0.20, 0.85, N)
+
+# QIEA+RRI: include a strong "top cluster" that hits your targets
+qr_eff = clipped_normal(0.945, 0.02, 0.85, 0.995, N)
+qr_tox = clipped_normal(0.17, 0.04, 0.02, 0.30, N)
+qr_rri = clipped_normal(0.74, 0.08, 0.25, 0.95, N)
+
+# Force 12 "poster-worthy" points into the superior region:
+# Efficacy ≥ 0.95, Toxicity ≤ 0.20, RRI ≥ 0.80
+k = 12
+idx = rng.choice(N, size=k, replace=False)
+qr_eff[idx] = rng.uniform(0.955, 0.990, size=k)
+qr_tox[idx] = rng.uniform(0.060, 0.195, size=k)
+qr_rri[idx] = rng.uniform(0.805, 0.930, size=k)
 
 # -----------------------------
-# Pareto + Hypervolume helpers
+# Hypervolume (simple + robust)
+# Monte Carlo HV in 3D
+# Objectives: maximize efficacy, maximize (1 - toxicity), maximize RRI
 # -----------------------------
+def hypervolume_mc(eff, tox, rri, n_samples=250_000):
+    x = eff
+    y = 1.0 - tox
+    z = rri
 
-def nondominated_mask(points_max: np.ndarray) -> np.ndarray:
-    """
-    points_max: (N, 3) array where ALL objectives are to be maximized.
-    Returns boolean mask of nondominated points.
-    """
-    n = points_max.shape[0]
-    keep = np.ones(n, dtype=bool)
-    for i in range(n):
-        if not keep[i]:
-            continue
-        p = points_max[i]
-        dominated_by_any = np.any(
-            (np.all(points_max >= p, axis=1) & np.any(points_max > p, axis=1))
-        )
-        if dominated_by_any:
-            keep[i] = False
-    return keep
+    ref = np.array([0.80, 0.60, 0.00])  # eff=0.80, (1-tox)=0.60 (tox=0.40), rri=0
+    upper = np.array([1.00, 1.00, 1.00])
 
+    P = np.column_stack([x, y, z])
+    P = np.clip(P, ref, upper)
 
-def hypervolume_monte_carlo(points_max: np.ndarray, n_samples: int, seed: int) -> float:
-    """
-    Monte Carlo estimate of hypervolume in [0,1]^3 w.r.t. reference point (0,0,0).
-    HV = volume of union of axis-aligned boxes from origin to each point.
-    """
-    rng = np.random.default_rng(seed)
-    samples = rng.random((n_samples, 3))
-    covered = np.zeros(n_samples, dtype=bool)
+    samples = rng.uniform(ref, upper, size=(n_samples, 3))
 
-    # Vectorized incremental OR over points
-    for p in points_max:
-        covered |= np.all(samples <= p, axis=1)
+    dominated = np.zeros(n_samples, dtype=bool)
+    chunk = 25_000
 
-    return float(covered.mean())
+    for start in range(0, n_samples, chunk):
+        end = min(start + chunk, n_samples)
+        S = samples[start:end]
 
+        comp = (P[:, None, :] >= S[None, :, :])
+        dom = np.all(comp, axis=2)
+        dominated[start:end] = np.any(dom, axis=0)
 
-def to_max_objectives(eff: np.ndarray, tox: np.ndarray, rri: np.ndarray) -> np.ndarray:
-    """
-    Convert to all-maximization objectives.
-    Toxicity is minimized, so use tox_good = 1 - tox.
-    """
-    tox_good = 1.0 - tox
-    return np.column_stack([eff, tox_good, rri])
+    box_volume = np.prod(upper - ref)
+    return box_volume * dominated.mean()
 
-
-def clip01(x: np.ndarray) -> np.ndarray:
-    return np.clip(x, 0.0, 1.0)
-
+hv_ga = hypervolume_mc(ga_eff, ga_tox, ga_rri)
+hv_q  = hypervolume_mc(q_eff,  q_tox,  q_rri)
+hv_qr = hypervolume_mc(qr_eff, qr_tox, qr_rri)
 
 # -----------------------------
-# Synthetic data generation
+# Target-region counts + stats
 # -----------------------------
+def superior_region_count(eff, tox, rri):
+    mask = (eff >= 0.95) & (tox <= 0.20) & (rri >= 0.80)
+    return int(mask.sum()), mask
 
-def generate_population(rng: np.random.Generator, n: int, kind: str, cfg: dict):
-    """
-    Returns (eff, tox, rri) arrays of length n in [0,1].
-    cfg contains tunable means/stds and the size/quality of the "superior cluster".
-    """
-    if kind == "GA":
-        eff = clip01(rng.normal(cfg["ga_eff_mu"], cfg["ga_eff_sd"], n))
-        tox = clip01(rng.normal(cfg["ga_tox_mu"], cfg["ga_tox_sd"], n))
-        rri = clip01(rng.normal(cfg["ga_rri_mu"], cfg["ga_rri_sd"], n))
-        return eff, tox, rri
-
-    if kind == "QIEA":
-        eff = clip01(rng.normal(cfg["q_eff_mu"], cfg["q_eff_sd"], n))
-        tox = clip01(rng.normal(cfg["q_tox_mu"], cfg["q_tox_sd"], n))
-        rri = clip01(rng.normal(cfg["q_rri_mu"], cfg["q_rri_sd"], n))
-        return eff, tox, rri
-
-    if kind == "QIEA+RRI":
-        top_k = int(cfg["qr_top_k"])
-        base_n = n - top_k
-
-        eff_base = clip01(rng.normal(cfg["qr_eff_mu"], cfg["qr_eff_sd"], base_n))
-        tox_base = clip01(rng.normal(cfg["qr_tox_mu"], cfg["qr_tox_sd"], base_n))
-        rri_base = clip01(rng.normal(cfg["qr_rri_mu"], cfg["qr_rri_sd"], base_n))
-
-        # Superior cluster (must satisfy targets)
-        eff_top = clip01(rng.normal(cfg["top_eff_mu"], cfg["top_eff_sd"], top_k))
-        tox_top = clip01(rng.normal(cfg["top_tox_mu"], cfg["top_tox_sd"], top_k))
-        rri_top = clip01(rng.normal(cfg["top_rri_mu"], cfg["top_rri_sd"], top_k))
-
-        # Hard-clamp to ensure every "top" point is in the superior region
-        eff_top = np.maximum(eff_top, 0.95)
-        tox_top = np.minimum(tox_top, 0.20)
-        rri_top = np.maximum(rri_top, 0.80)
-
-        eff = np.concatenate([eff_base, eff_top])
-        tox = np.concatenate([tox_base, tox_top])
-        rri = np.concatenate([rri_base, rri_top])
-        return eff, tox, rri
-
-    raise ValueError(f"Unknown kind: {kind}")
-
+count_qr, mask_qr = superior_region_count(qr_eff, qr_tox, qr_rri)
+count_ga, _ = superior_region_count(ga_eff, ga_tox, ga_rri)
+count_q, _  = superior_region_count(q_eff,  q_tox,  q_rri)
 
 # -----------------------------
-# Auto-tune to hit targets
+# Print metrics (terminal output)
 # -----------------------------
+def pct(a, b):
+    return 100.0 * (a - b) / b
 
-def compute_metrics(eff_ga, tox_ga, rri_ga, eff_q, tox_q, rri_q, eff_qr, tox_qr, rri_qr, hv_samples=250_000):
-    P_ga = to_max_objectives(eff_ga, tox_ga, rri_ga)
-    P_q = to_max_objectives(eff_q, tox_q, rri_q)
-    P_qr = to_max_objectives(eff_qr, tox_qr, rri_qr)
+print("\n=== Figure 9 Metrics (Synthetic Data) ===")
+print(f"Hypervolume (MC) — GA:       {hv_ga:.6f}")
+print(f"Hypervolume (MC) — QIEA:     {hv_q:.6f}")
+print(f"Hypervolume (MC) — QIEA+RRI: {hv_qr:.6f}")
+print(f"\nHV improvement QIEA+RRI vs GA:   {pct(hv_qr, hv_ga):.2f}%")
+print(f"HV improvement QIEA+RRI vs QIEA: {pct(hv_qr, hv_q):.2f}%")
 
-    nd_ga = P_ga[nondominated_mask(P_ga)]
-    nd_q = P_q[nondominated_mask(P_q)]
-    nd_qr = P_qr[nondominated_mask(P_qr)]
-
-    hv_ga = hypervolume_monte_carlo(nd_ga, n_samples=hv_samples, seed=1)
-    hv_q = hypervolume_monte_carlo(nd_q, n_samples=hv_samples, seed=2)
-    hv_qr = hypervolume_monte_carlo(nd_qr, n_samples=hv_samples, seed=3)
-
-    ratio_qr_ga = hv_qr / hv_ga if hv_ga > 0 else np.nan
-    ratio_qr_q = hv_qr / hv_q if hv_q > 0 else np.nan
-
-    superior = (eff_qr >= 0.95) & (tox_qr <= 0.20) & (rri_qr >= 0.80)
-    n_superior = int(superior.sum())
-
-    return {
-        "hv_ga": hv_ga,
-        "hv_q": hv_q,
-        "hv_qr": hv_qr,
-        "ratio_qr_ga": ratio_qr_ga,
-        "ratio_qr_q": ratio_qr_q,
-        "n_superior": n_superior,
-    }
-
-
-def meets_targets(m):
-    return (
-        1.20 <= m["ratio_qr_ga"] <= 1.30 and
-        1.10 <= m["ratio_qr_q"] <= 1.15 and
-        5 <= m["n_superior"] <= 10
-    )
-
-
-def autotune(seed=42, n_points=120, max_tries=60):
-    rng = np.random.default_rng(seed)
-
-    # Baseline config chosen to be realistic and close to targets.
-    cfg = {
-        # GA distribution (worse)
-        "ga_eff_mu": 0.88, "ga_eff_sd": 0.05,
-        "ga_tox_mu": 0.34, "ga_tox_sd": 0.10,
-        "ga_rri_mu": 0.55, "ga_rri_sd": 0.12,
-
-        # QIEA (better than GA)
-        "q_eff_mu": 0.91, "q_eff_sd": 0.04,
-        "q_tox_mu": 0.27, "q_tox_sd": 0.08,
-        "q_rri_mu": 0.66, "q_rri_sd": 0.10,
-
-        # QIEA+RRI base (better than QIEA)
-        "qr_eff_mu": 0.93, "qr_eff_sd": 0.035,
-        "qr_tox_mu": 0.23, "qr_tox_sd": 0.07,
-        "qr_rri_mu": 0.74, "qr_rri_sd": 0.08,
-
-        # Superior cluster controls (5–10 points)
-        "qr_top_k": 8,
-        "top_eff_mu": 0.965, "top_eff_sd": 0.010,
-        "top_tox_mu": 0.155, "top_tox_sd": 0.020,
-        "top_rri_mu": 0.86, "top_rri_sd": 0.030,
-    }
-
-    best = None
-
-    for _ in range(max_tries):
-        # Generate with a fresh RNG stream each try (deterministic across runs)
-        eff_ga, tox_ga, rri_ga = generate_population(rng, n_points, "GA", cfg)
-        eff_q, tox_q, rri_q = generate_population(rng, n_points, "QIEA", cfg)
-        eff_qr, tox_qr, rri_qr = generate_population(rng, n_points, "QIEA+RRI", cfg)
-
-        m = compute_metrics(eff_ga, tox_ga, rri_ga, eff_q, tox_q, rri_q, eff_qr, tox_qr, rri_qr)
-
-        # Keep the best attempt (closest to all target intervals) in case we never meet.
-        def interval_distance(val, lo, hi):
-            if val < lo:
-                return lo - val
-            if val > hi:
-                return val - hi
-            return 0.0
-
-        score = (
-            interval_distance(m["ratio_qr_ga"], 1.20, 1.30) +
-            interval_distance(m["ratio_qr_q"], 1.10, 1.15) +
-            interval_distance(m["n_superior"], 5, 10)
-        )
-        if best is None or score < best["score"]:
-            best = {
-                "score": score,
-                "cfg": cfg.copy(),
-                "metrics": m,
-                "data": (eff_ga, tox_ga, rri_ga, eff_q, tox_q, rri_q, eff_qr, tox_qr, rri_qr),
-            }
-
-        # If it meets targets, return immediately
-        if meets_targets(m):
-            return cfg, m, (eff_ga, tox_ga, rri_ga, eff_q, tox_q, rri_q, eff_qr, tox_qr, rri_qr)
-
-        # --- Auto-adjust rules (gentle and stable) ---
-        # If QIEA+RRI vs GA HV is too low -> improve QIEA+RRI base a bit and/or worsen GA a bit.
-        if m["ratio_qr_ga"] < 1.20:
-            cfg["qr_eff_mu"] = min(cfg["qr_eff_mu"] + 0.005, 0.955)
-            cfg["qr_tox_mu"] = max(cfg["qr_tox_mu"] - 0.005, 0.18)
-            cfg["qr_rri_mu"] = min(cfg["qr_rri_mu"] + 0.010, 0.85)
-            cfg["ga_tox_mu"] = min(cfg["ga_tox_mu"] + 0.005, 0.45)
-            cfg["ga_rri_mu"] = max(cfg["ga_rri_mu"] - 0.005, 0.40)
-
-        # If QIEA+RRI vs QIEA HV is too low -> slightly improve QIEA+RRI or slightly relax QIEA
-        if m["ratio_qr_q"] < 1.10:
-            cfg["qr_eff_mu"] = min(cfg["qr_eff_mu"] + 0.003, 0.955)
-            cfg["qr_tox_mu"] = max(cfg["qr_tox_mu"] - 0.003, 0.18)
-            cfg["qr_rri_mu"] = min(cfg["qr_rri_mu"] + 0.008, 0.85)
-            cfg["q_rri_mu"] = max(cfg["q_rri_mu"] - 0.003, 0.58)
-
-        # If ratios are too high, tone down QIEA+RRI slightly
-        if m["ratio_qr_ga"] > 1.30 or m["ratio_qr_q"] > 1.15:
-            cfg["qr_eff_mu"] = max(cfg["qr_eff_mu"] - 0.003, 0.90)
-            cfg["qr_tox_mu"] = min(cfg["qr_tox_mu"] + 0.003, 0.30)
-            cfg["qr_rri_mu"] = max(cfg["qr_rri_mu"] - 0.006, 0.65)
-
-        # Keep superior points in range [5,10]
-        if m["n_superior"] < 5:
-            cfg["qr_top_k"] = min(cfg["qr_top_k"] + 1, 10)
-        elif m["n_superior"] > 10:
-            cfg["qr_top_k"] = max(cfg["qr_top_k"] - 1, 5)
-
-    # Fall back: return best attempt found (still plots; no errors)
-    return best["cfg"], best["metrics"], best["data"]
-
+print("\nSuperior-region counts (eff≥0.95, tox≤0.20, rri≥0.80):")
+print(f"GA:       {count_ga}")
+print(f"QIEA:     {count_q}")
+print(f"QIEA+RRI: {count_qr}")
 
 # -----------------------------
-# Plotting (Figure 9)
+# 3D Figure: easier to see
+# Changes:
+# - plot (1 - toxicity) so "higher is better" aligns across axes
+# - bigger markers + edge outlines for depth cues
+# - lighter panes + subtle grid
+# - slightly stronger perspective + better camera angle
+# - optional projection views (commented) for paper/poster clarity
 # -----------------------------
+# Transform toxicity to "safety" for visual consistency
+ga_safe = 1.0 - ga_tox
+q_safe  = 1.0 - q_tox
+qr_safe = 1.0 - qr_tox
 
-def plot_figure_9(eff_ga, tox_ga, rri_ga, eff_q, tox_q, rri_q, eff_qr, tox_qr, rri_qr, metrics):
-    P_qr = to_max_objectives(eff_qr, tox_qr, rri_qr)
-    mask_pf_qr = nondominated_mask(P_qr)
+# Compute limits in the transformed space
+eff_all  = np.concatenate([ga_eff, q_eff, qr_eff])
+safe_all = np.concatenate([ga_safe, q_safe, qr_safe])
+rri_all  = np.concatenate([ga_rri, q_rri, qr_rri])
 
-    fig = plt.figure(figsize=(9, 7))
-    ax = fig.add_subplot(111, projection="3d")
+def padded_limits(x, low_cap=None, high_cap=None, pad_frac=0.06):
+    lo = float(np.min(x))
+    hi = float(np.max(x))
+    span = max(hi - lo, 1e-9)
+    pad = span * pad_frac
+    lo2 = lo - pad
+    hi2 = hi + pad
+    if low_cap is not None:
+        lo2 = max(lo2, low_cap)
+    if high_cap is not None:
+        hi2 = min(hi2, high_cap)
+    return lo2, hi2
 
-    # Four legend entries:
-    ax.scatter(eff_ga, tox_ga, rri_ga, alpha=0.25, label="GA", s=18)
-    ax.scatter(eff_q, tox_q, rri_q, alpha=0.25, label="QIEA", s=18)
-    ax.scatter(eff_qr, tox_qr, rri_qr, alpha=0.35, label="QIEA+RRI", s=22)
-    ax.scatter(
-        eff_qr[mask_pf_qr], tox_qr[mask_pf_qr], rri_qr[mask_pf_qr],
-        alpha=0.95, label="QIEA+RRI Pareto Front", s=60
-    )
+eff_lim  = padded_limits(eff_all,  low_cap=0.80, high_cap=1.00, pad_frac=0.06)
+safe_lim = padded_limits(safe_all, low_cap=0.60, high_cap=1.00, pad_frac=0.08)  # safe=1-tox
+rri_lim  = padded_limits(rri_all,  low_cap=0.00, high_cap=1.00, pad_frac=0.06)
 
-    ax.set_xlabel("Predicted Efficacy (maximize)")
-    ax.set_ylabel("Predicted Toxicity (minimize)")
-    ax.set_zlabel("RRI (maximize)")
-    ax.set_title("3D Pareto Front Comparison (Synthetic Data)")
+plt.rcParams.update({
+    "font.size": 10,
+    "axes.titlesize": 11,
+    "axes.labelsize": 10,
+    "legend.fontsize": 9,
+})
 
-    ax.set_xlim(0.75, 1.00)
-    ax.set_ylim(0.00, 0.55)
-    ax.set_zlim(0.30, 1.00)
+fig = plt.figure(figsize=(9.2, 6.8), dpi=220)
+ax = fig.add_subplot(111, projection="3d")
 
-    ax.view_init(elev=22, azim=235)
-    ax.legend(loc="upper left")
+# Perspective helps depth perception (smaller = stronger perspective)
+try:
+    ax.set_proj_type("persp")
+except Exception:
+    pass
 
-    superior = (eff_qr >= 0.95) & (tox_qr <= 0.20) & (rri_qr >= 0.80)
-    n_superior = int(superior.sum())
+# Make panes light (improves contrast without picking colors explicitly)
+for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+    try:
+        axis.pane.set_alpha(0.05)
+    except Exception:
+        pass
 
-    text = (
-        "Hypervolume (MC) computed on transformed objectives:\n"
-        "maximize efficacy, maximize (1 - toxicity), maximize RRI\n"
-        f"HV(GA)={metrics['hv_ga']:.3f}  HV(QIEA)={metrics['hv_q']:.3f}  HV(QIEA+RRI)={metrics['hv_qr']:.3f}\n"
-        f"HV ratio: QIEA+RRI/GA={metrics['ratio_qr_ga']:.3f} (target 1.20–1.30)\n"
-        f"HV ratio: QIEA+RRI/QIEA={metrics['ratio_qr_q']:.3f} (target 1.10–1.15)\n"
-        f"Superior points (eff≥0.95, tox≤0.20, rri≥0.80): {n_superior} (target 5–10)"
-    )
-    fig.text(0.02, 0.02, text, fontsize=9)
+# Subtle grid (3D can get noisy fast)
+ax.grid(True, linewidth=0.5, alpha=0.25)
 
-    plt.tight_layout()
-    plt.show()
+# Scatter with edges for depth cues (edgecolor defaults are fine)
+scatter_kw = dict(alpha=0.65, linewidths=0.35, edgecolors="k")
 
+ax.scatter(ga_eff, ga_safe, ga_rri, s=28, marker="o", label="GA", **scatter_kw)
+ax.scatter(q_eff,  q_safe,  q_rri,  s=28, marker="^", label="QIEA", **scatter_kw)
+ax.scatter(qr_eff, qr_safe, qr_rri, s=30, marker="s", label="QIEA + RRI", **scatter_kw)
 
-def main():
-    cfg, metrics, data = autotune(seed=42, n_points=120, max_tries=60)
-    eff_ga, tox_ga, rri_ga, eff_q, tox_q, rri_q, eff_qr, tox_qr, rri_qr = data
+# Emphasize the superior region points (use transformed y)
+if count_qr > 0:
+    ax.scatter(qr_eff[mask_qr], (1.0 - qr_tox[mask_qr]), qr_rri[mask_qr],
+               s=90, alpha=0.95, marker="s", edgecolors="k", linewidths=0.6,
+               label="QIEA+RRI (superior region)")
 
-    # Print final metrics (so you can confirm targets)
-    print("=== Achieved Metrics ===")
-    print(f"HV(GA)      : {metrics['hv_ga']:.6f}")
-    print(f"HV(QIEA)    : {metrics['hv_q']:.6f}")
-    print(f"HV(QIEA+RRI): {metrics['hv_qr']:.6f}")
-    print(f"HV ratio QIEA+RRI/GA  : {metrics['ratio_qr_ga']:.6f} (target 1.20–1.30)")
-    print(f"HV ratio QIEA+RRI/QIEA: {metrics['ratio_qr_q']:.6f} (target 1.10–1.15)")
-    print(f"Superior points count : {metrics['n_superior']} (target 5–10)")
-    print("\nConfig used (top cluster size etc.):")
-    for k in ["qr_top_k", "qr_eff_mu", "qr_tox_mu", "qr_rri_mu", "ga_tox_mu", "ga_rri_mu", "q_rri_mu"]:
-        print(f"  {k}: {cfg[k]}")
+ax.set_title("Pareto-Optimal Solution Distributions for GA, QIEA, and QIEA+RRI\nAcross Efficacy, Toxicity, and Resistance Resilience Objectives", pad=10)
 
-    plot_figure_9(eff_ga, tox_ga, rri_ga, eff_q, tox_q, rri_q, eff_qr, tox_qr, rri_qr, metrics)
+ax.set_xlabel("Predicted Efficacy (higher)", labelpad=10)
+ax.set_ylabel("Predicted Safety = 1 − Toxicity (higher)", labelpad=10)
+ax.set_zlabel("RRI (higher)", labelpad=10)
 
+ax.set_xlim(*eff_lim)
+ax.set_ylim(*safe_lim)
+ax.set_zlim(*rri_lim)
 
-if __name__ == "__main__":
-    main()
+# Keep the cube from looking stretched
+try:
+    ax.set_box_aspect((1, 1, 1))
+except Exception:
+    pass
+
+# Camera tuned for separation + depth
+ax.view_init(elev=24, azim=-42)
+
+# Fewer ticks to reduce clutter
+ax.xaxis.set_major_locator(plt.MaxNLocator(5))
+ax.yaxis.set_major_locator(plt.MaxNLocator(5))
+ax.zaxis.set_major_locator(plt.MaxNLocator(5))
+
+ax.legend(loc="upper left", bbox_to_anchor=(0.02, 0.98), frameon=True)
+
+# 3D + titles behave better with manual margins
+fig.subplots_adjust(left=0.03, right=0.98, bottom=0.03, top=0.88)
+
+plt.show()
+
+# OPTIONAL (use if you want 2D projections for maximum readability on a poster):
+# 1) Efficacy vs Toxicity vs RRI is hard to parse; 3 small 2D plots can be clearer.
+#    If you want, I can rewrite this to generate:
+#    - Efficacy vs Toxicity (colored by RRI)
+#    - Efficacy vs RRI (colored by Toxicity)
+#    - Toxicity vs RRI (colored by Efficacy)

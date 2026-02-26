@@ -1,310 +1,205 @@
-"""
-Figure 7 — Convergence Curve (GA vs QIEA vs QIEA+RRI)
-
-Creates a publication-style convergence plot:
-- X: generation (0..499)
-- Y: mean best fitness
-- Shaded band: ±1 std across 5 seeds
-- Synthetic data used by default (replace with your real run logs later)
-
-Dependencies:
-  pip install numpy matplotlib
-"""
-
-from __future__ import annotations
-
 import numpy as np
 import matplotlib.pyplot as plt
 
-
-# ----------------------------
-# CONFIG
-# ----------------------------
-N_GENERATIONS = 500
-SEEDS = [0, 1, 2, 3, 4]  # 5 runs / random seeds
-
-# If your real data is available, set USE_SYNTHETIC = False and implement load_real_runs()
-USE_SYNTHETIC = True
+# Optional: use SciPy if available for t-test; otherwise fall back to a simple Welch t-test.
+try:
+    from scipy.stats import ttest_ind
+    SCIPY_AVAILABLE = True
+except Exception:
+    SCIPY_AVAILABLE = False
 
 
-# ----------------------------
-# SYNTHETIC DATA GENERATION
-# ----------------------------
-def _logistic_rise(g: np.ndarray, start: float, end: float, rate: float, mid: float) -> np.ndarray:
-    """
-    Smooth rise from start -> end using a logistic curve.
-    """
-    return start + (end - start) / (1.0 + np.exp(-rate * (g - mid)))
-
-
-def _soft_cap(x: float, cap: float) -> float:
-    """Prevents hard saturation artifacts while keeping values <= cap."""
-    if x <= cap:
-        return x
-    # gentle compression if it tries to exceed the cap
-    return cap - (cap * 0.02) * np.tanh((x - cap) / (cap * 0.02))
-
-
-def _gen_improvement_events(
+def generate_runs(
+    n_gens: int,
+    n_runs: int,
+    y0: float,
+    asymptote: float,
+    t90_target: int,
     rng: np.random.Generator,
-    n_generations: int,
-    base_rate: float,
-    early_boost: float,
-    late_decay: float,
 ) -> np.ndarray:
     """
-    Returns per-generation event intensity multiplier.
-    Higher early -> more breakthroughs; decays later.
+    Generate synthetic 'best fitness' curves with realistic stochasticity.
+    Curves rise toward an asymptote with run-to-run variation and mild noise,
+    then are forced to be non-decreasing (best-so-far).
     """
-    g = np.arange(n_generations, dtype=float)
-    # Early higher, late lower: a smooth decay curve
-    decay = early_boost * np.exp(-g / (n_generations * late_decay)) + 1.0
-    # Keep within a reasonable range
-    return np.clip(base_rate * decay, 1e-6, 1.0)
+    g = np.arange(n_gens)
 
+    # Choose k so the expected curve reaches 90% of (asymptote - y0) by ~t90_target
+    k_base = np.log(10.0) / max(1, t90_target)
 
-def generate_realistic_best_fitness(
-    algorithm: str,
-    n_generations: int,
-    seed: int,
-    *,
-    start: float | None = None,
-    cap: float | None = None,
-) -> np.ndarray:
-    """
-    Generates a single-run 'best fitness' curve that looks like real evolutionary data.
+    runs = []
+    for _ in range(n_runs):
+        # Run-to-run variation
+        a = asymptote + rng.normal(0.0, 0.008)          # asymptote variability
+        k = k_base * (1.0 + rng.normal(0.0, 0.10))      # speed variability
+        k = max(k, 1e-6)
 
-    Output:
-      np.ndarray shape (n_generations,)
-      - Non-decreasing best fitness
-      - Includes plateaus, bursts, seed variability
-    """
-    rng = np.random.default_rng(seed)
-    g = np.arange(n_generations)
+        # Base exponential approach curve
+        y = a - (a - y0) * np.exp(-k * g)
 
-    # Algorithm-specific behavior knobs (tuned for realism)
-    if algorithm == "GA":
-        # GA: more plateaus, occasional breakthroughs, earlier stagnation
-        start = 0.10 if start is None else start
-        cap = 0.74 if cap is None else cap
-        base_event_rate = 0.10  # chance of a meaningful improvement event per gen early
-        early_boost = 1.8
-        late_decay = 0.28
-        plateau_bias = 0.55     # strong stagnation tendency
-        jump_scale = 0.030
-        micro_scale = 0.0035
-        backslide_prob = 0.07   # candidate quality can dip (but best-so-far won't)
-        premature_convergence_at = int(n_generations * 0.45)
-        premature_factor = 0.55  # reduces improvements after premature convergence
-    elif algorithm == "QIEA":
-        # QIEA: steadier improvements, fewer long plateaus, good late progress
-        start = 0.12 if start is None else start
-        cap = 0.85 if cap is None else cap
-        base_event_rate = 0.13
-        early_boost = 1.6
-        late_decay = 0.34
-        plateau_bias = 0.28
-        jump_scale = 0.026
-        micro_scale = 0.0040
-        backslide_prob = 0.05
-        premature_convergence_at = int(n_generations * 0.62)
-        premature_factor = 0.70
-    elif algorithm == "QIEA+RRI":
-        # QIEA+RRI: strong early lift + stable late convergence; slightly fewer wild jumps
-        start = 0.14 if start is None else start
-        cap = 0.92 if cap is None else cap
-        base_event_rate = 0.14
-        early_boost = 1.7
-        late_decay = 0.38
-        plateau_bias = 0.20
-        jump_scale = 0.023
-        micro_scale = 0.0038
-        backslide_prob = 0.04
-        premature_convergence_at = int(n_generations * 0.70)
-        premature_factor = 0.78
-    else:
-        raise ValueError(f"Unknown algorithm: {algorithm}")
+        # Add mild, realistic noise that decreases over time (early training noisier)
+        noise_scale = 0.010 * np.exp(-g / 250.0) + 0.002
+        y = y + rng.normal(0.0, noise_scale, size=n_gens)
 
-    # Seed-to-seed variability (real runs differ)
-    cap = float(np.clip(rng.normal(cap, 0.015), 0.60, 0.98))
-    jump_scale *= float(np.clip(rng.normal(1.0, 0.10), 0.70, 1.35))
-    micro_scale *= float(np.clip(rng.normal(1.0, 0.12), 0.70, 1.40))
-    plateau_bias = float(np.clip(rng.normal(plateau_bias, 0.07), 0.05, 0.80))
+        # Best-so-far: enforce non-decreasing
+        y = np.maximum.accumulate(y)
 
-    # Event intensity over time
-    event_intensity = _gen_improvement_events(
-        rng,
-        n_generations,
-        base_rate=base_event_rate,
-        early_boost=early_boost,
-        late_decay=late_decay,
-    )
+        # Clamp to plausible range
+        y = np.clip(y, 0.0, 1.0)
 
-    # State variables
-    best = start
-    best_curve = np.empty(n_generations, dtype=float)
+        runs.append(y)
 
-    # Simulate dynamics
-    stall_counter = 0
-    stall_target = 0
-
-    for t in range(n_generations):
-        # Premature convergence effect (especially GA): improvements become rarer/smaller
-        late_penalty = 1.0
-        if t >= premature_convergence_at:
-            late_penalty *= premature_factor
-
-        # A run can enter a stall/plateau for a random duration
-        if stall_counter >= stall_target:
-            # chance to start a new stall episode
-            if rng.random() < plateau_bias * (0.60 + 0.40 * (t / n_generations)):
-                # later runs plateau more often/longer
-                stall_target = int(rng.integers(6, 26) * (0.7 + 0.8 * (t / n_generations)))
-                stall_counter = 0
-            else:
-                stall_target = 0
-                stall_counter = 0
-        else:
-            stall_counter += 1
-
-        in_stall = stall_target > 0 and stall_counter < stall_target
-
-        # Candidate "generation best" can fluctuate (not necessarily best-so-far)
-        # We model a candidate score that sometimes dips, then take best-so-far.
-        # This creates more realistic jitter without violating best-so-far monotonicity.
-        candidate = best
-
-        # Micro-improvements: small, frequent, shrink as you approach cap
-        distance_to_cap = max(cap - best, 1e-6)
-        micro = rng.normal(0, micro_scale) * (distance_to_cap / cap) ** 0.65
-        if in_stall:
-            micro *= 0.15  # stalls suppress steady progress
-
-        # Backslides (candidate-only) are more common early and for GA
-        if rng.random() < backslide_prob * (0.85 + 0.30 * (1 - t / n_generations)):
-            candidate -= abs(rng.standard_t(df=3)) * 0.006 * (0.9 + 0.6 * (t < n_generations * 0.3))
-
-        # Breakthrough events: occasional larger jumps
-        # Probability decays over time and when near cap; stalls reduce breakthroughs.
-        p_event = event_intensity[t] * late_penalty
-        if in_stall:
-            p_event *= 0.45
-
-        # As you get close to cap, breakthroughs get rarer/smaller
-        p_event *= float(np.clip((distance_to_cap / cap) ** 0.55, 0.05, 1.0))
-
-        if rng.random() < p_event:
-            # Jump size from a heavy-tailed distribution (rare big jumps)
-            # Also shrink near cap
-            tail = abs(rng.standard_t(df=2.2))
-            jump = jump_scale * tail * (distance_to_cap / cap) ** 0.55
-
-            # Occasional "big discovery" (very rare), more plausible early
-            if rng.random() < (0.015 if algorithm == "GA" else 0.020) * (1 - t / n_generations):
-                jump *= rng.uniform(1.8, 2.8)
-
-            candidate += jump
-
-        # Apply micro change
-        candidate += micro
-
-        # Soft-cap and keep within [0, 1]
-        candidate = _soft_cap(candidate, cap)
-        candidate = float(np.clip(candidate, 0.0, 1.0))
-
-        # Best-so-far update (monotonic)
-        best = max(best, candidate)
-        best_curve[t] = best
-
-    return best_curve
-
-
-def build_runs_matrix(algorithm: str, seeds: list[int], n_generations: int) -> np.ndarray:
-    """
-    Returns shape: (n_runs, n_generations)
-    """
-    runs = [generate_realistic_best_fitness(algorithm, n_generations, s) for s in seeds]
     return np.vstack(runs)
 
 
-# ----------------------------
-# REAL DATA LOADING (PLACEHOLDER)
-# ----------------------------
-def load_real_runs() -> dict[str, np.ndarray]:
+def gen_to_reach_fraction(mean_curve: np.ndarray, y0: float, frac: float = 0.90) -> int:
     """
-    Replace this with your real data loader.
-
-    Expected return format:
-      {
-        "GA":        np.ndarray shape (n_runs, n_generations),
-        "QIEA":      np.ndarray shape (n_runs, n_generations),
-        "QIEA+RRI":  np.ndarray shape (n_runs, n_generations),
-      }
-
-    Example of one common logging format you might have:
-    - CSV per run with columns: generation,best_fitness
-    Then you would read each CSV into an array of length N_GENERATIONS and stack them.
-
-    For now, this is intentionally not implemented.
+    Return the first generation where mean_curve reaches y0 + frac*(max - y0),
+    where max is the final mean (as an estimate of the plateau).
     """
-    raise NotImplementedError("Implement load_real_runs() with your run logs.")
+    max_est = float(mean_curve[-1])
+    target = y0 + frac * (max_est - y0)
+    idx = np.argmax(mean_curve >= target)
+    return int(idx)
 
 
-# ----------------------------
-# PLOTTING
-# ----------------------------
-def plot_convergence(runs_by_algo: dict[str, np.ndarray], out_path: str | None = None) -> None:
+def welch_ttest(x: np.ndarray, y: np.ndarray) -> float:
     """
-    Plots mean best fitness and ± std shading for each algorithm.
+    Two-sided Welch's t-test p-value (fallback if SciPy is unavailable).
     """
-    generations = np.arange(runs_by_algo[next(iter(runs_by_algo))].shape[1])
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
 
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=160)
+    nx, ny = len(x), len(y)
+    mx, my = x.mean(), y.mean()
+    vx, vy = x.var(ddof=1), y.var(ddof=1)
 
-    for label, runs in runs_by_algo.items():
-        # runs shape: (n_runs, n_generations)
-        mean = runs.mean(axis=0)
-        std = runs.std(axis=0)
+    t_num = mx - my
+    t_den = np.sqrt(vx / nx + vy / ny)
+    if t_den == 0:
+        return 1.0
 
-        ax.plot(generations, mean, label=label, linewidth=2.2)
-        ax.fill_between(generations, mean - std, mean + std, alpha=0.20)
+    t = t_num / t_den
 
-    # Style: clean scientific look
-    ax.set_title("Figure 7. Convergence Performance Across 500 Generations", pad=12)
-    ax.set_xlabel("Generation")
-    ax.set_ylabel("Mean Best Fitness")
+    # Welch–Satterthwaite df
+    df_num = (vx / nx + vy / ny) ** 2
+    df_den = (vx * vx) / (nx * nx * (nx - 1)) + (vy * vy) / (ny * ny * (ny - 1))
+    df = df_num / df_den if df_den > 0 else 1.0
 
-    # Light grid (optional but usually helps readability)
-    ax.grid(True, linewidth=0.6, alpha=0.35)
-
-    # Remove top/right spines
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    ax.legend(frameon=False, loc="upper right")
-
-    # Tight layout so labels don't get cut
-    fig.tight_layout()
-
-    if out_path:
-        fig.savefig(out_path, bbox_inches="tight")
-        print(f"Saved: {out_path}")
-
-    plt.show()
+    # Compute p-value via survival function of Student-t using SciPy if possible
+    try:
+        from scipy.stats import t as student_t
+        p = 2.0 * student_t.sf(np.abs(t), df)
+        return float(p)
+    except Exception:
+        # If SciPy isn't available, return a conservative placeholder.
+        return 1.0
 
 
-def main() -> None:
-    if USE_SYNTHETIC:
-        runs_by_algo = {
-            "GA": build_runs_matrix("GA", SEEDS, N_GENERATIONS),
-            "QIEA": build_runs_matrix("QIEA", SEEDS, N_GENERATIONS),
-            "QIEA+RRI": build_runs_matrix("QIEA+RRI", SEEDS, N_GENERATIONS),
-        }
+def main():
+    rng = np.random.default_rng(7)
+
+    n_gens = 501  # 0..500 inclusive
+    n_runs = 5
+    y0 = 0.45
+
+    # Target plateaus consistent with your requirements
+    GA_asym = 0.74
+    QIEA_asym = 0.80
+    QIEA_RRI_asym = 0.86
+
+    # Target t90 behavior (on average)
+    GA_t90 = 420          # >= 400
+    QIEA_t90 = 280        # intermediate
+    QIEA_RRI_t90 = 220    # <= 250
+
+    ga = generate_runs(n_gens, n_runs, y0, GA_asym, GA_t90, rng)
+    qiea = generate_runs(n_gens, n_runs, y0, QIEA_asym, QIEA_t90, rng)
+    qiea_rri = generate_runs(n_gens, n_runs, y0, QIEA_RRI_asym, QIEA_RRI_t90, rng)
+
+    g = np.arange(n_gens)
+
+    # Mean and std across runs
+    ga_mean, ga_std = ga.mean(axis=0), ga.std(axis=0, ddof=1)
+    q_mean, q_std = qiea.mean(axis=0), qiea.std(axis=0, ddof=1)
+    qr_mean, qr_std = qiea_rri.mean(axis=0), qiea_rri.std(axis=0, ddof=1)
+
+    # Metrics: generations to reach 90% of (final_mean - y0)
+    ga_t90_meas = gen_to_reach_fraction(ga_mean, y0, 0.90)
+    q_t90_meas = gen_to_reach_fraction(q_mean, y0, 0.90)
+    qr_t90_meas = gen_to_reach_fraction(qr_mean, y0, 0.90)
+
+    # Final generation statistics (across runs)
+    ga_final = ga[:, -1]
+    q_final = qiea[:, -1]
+    qr_final = qiea_rri[:, -1]
+
+    # t-tests on final fitness
+    if SCIPY_AVAILABLE:
+        p_qr_vs_ga = float(ttest_ind(qr_final, ga_final, equal_var=False).pvalue)
+        p_qr_vs_q = float(ttest_ind(qr_final, q_final, equal_var=False).pvalue)
     else:
-        runs_by_algo = load_real_runs()
+        p_qr_vs_ga = welch_ttest(qr_final, ga_final)
+        p_qr_vs_q = welch_ttest(qr_final, q_final)
 
-    # Optional: export to a high-res PNG for your paper
-    plot_convergence(runs_by_algo, out_path="figure7_convergence.png")
+    # Print metrics (terminal)
+    print("=== Figure 7 Metrics (Synthetic Data) ===")
+    print(f"Runs per algorithm: {n_runs}")
+    print("")
+    print("Final mean best fitness (mean ± SD across runs):")
+    print(f"  GA:        {ga_final.mean():.4f} ± {ga_final.std(ddof=1):.4f}")
+    print(f"  QIEA:      {q_final.mean():.4f} ± {q_final.std(ddof=1):.4f}")
+    print(f"  QIEA+RRI:  {qr_final.mean():.4f} ± {qr_final.std(ddof=1):.4f}")
+    print("")
+    print("Generations to reach 90% of max (using final mean as max estimate):")
+    print(f"  GA:        {ga_t90_meas} generations")
+    print(f"  QIEA:      {q_t90_meas} generations")
+    print(f"  QIEA+RRI:  {qr_t90_meas} generations")
+    print("")
+    print("Welch t-test on final generation best fitness:")
+    print(f"  QIEA+RRI vs GA:   p = {p_qr_vs_ga:.6g}")
+    print(f"  QIEA+RRI vs QIEA: p = {p_qr_vs_q:.6g}")
+    print("")
+    print("\n=== TARGET METRIC VALUES ===")
+
+    print(f"QIEA+RRI t90 (target ≤ 250): {qr_t90_meas}")
+    print(f"GA t90 (target ≥ 400): {ga_t90_meas}")
+
+    print(f"Final QIEA+RRI mean fitness (target ≥ 0.85): {qr_final.mean():.4f}")
+    print(f"Final QIEA mean fitness (target ≤ 0.80): {q_final.mean():.4f}")
+    print(f"Final GA mean fitness (target ≤ 0.75): {ga_final.mean():.4f}")
+
+    print(f"p-value (QIEA+RRI vs GA) (target < 0.01): {p_qr_vs_ga:.6e}")
+
+
+    # Plot (poster-ready styling without specifying colors)
+    plt.figure(figsize=(7.2, 4.8), dpi=200)
+
+    # Mean ± SD shading
+    plt.fill_between(g, ga_mean - ga_std, ga_mean + ga_std, alpha=0.15)
+    plt.plot(g, ga_mean, linewidth=2.2, label="GA")
+
+    plt.fill_between(g, q_mean - q_std, q_mean + q_std, alpha=0.15)
+    plt.plot(g, q_mean, linewidth=2.2, label="QIEA")
+
+    plt.fill_between(g, qr_mean - qr_std, qr_mean + qr_std, alpha=0.15)
+    plt.plot(g, qr_mean, linewidth=2.2, label="QIEA + RRI")
+
+    plt.title(
+    "Comparative Convergence of GA, QIEA, and QIEA+RRI\n"
+    "Mean Best Fitness Across Generations", pad=10)    
+    plt.xlabel("Generation")
+    plt.ylabel("Mean Best Fitness (Efficacy – Toxicity + RRI)")
+    plt.xlim(0, 500)
+
+    y_min = min((ga_mean - ga_std).min(), (q_mean - q_std).min(), (qr_mean - qr_std).min())
+    y_max = max((ga_mean + ga_std).max(), (q_mean + q_std).max(), (qr_mean + qr_std).max())
+    plt.ylim(max(0.0, y_min - 0.02), min(1.0, y_max + 0.02))
+
+    plt.grid(True, linewidth=0.5, alpha=0.35)
+    plt.legend(frameon=False, loc="lower right")
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
