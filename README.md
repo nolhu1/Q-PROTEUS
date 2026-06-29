@@ -5,7 +5,7 @@
 Q-PROTEUS is a computational framework for designing antimicrobial peptides (AMPs) with explicit pressure for resistance resilience that includes a novel metric Resistance Resilience Index (RRI), paired with a Quantum-Inspired Evolutionary Algorithm (QIEA) for evolutionary optimization.
 
 The repository is organized around the methods of this project and includes source code and used datasets.
-### Full paper at full_paper.pdf
+### **Full paper at full_paper.pdf
 
 ## Overview
 
